@@ -15,14 +15,21 @@ type Runner struct {
 	Client   *alpaca.AlpacaClient
 	Notifier *notifier.TelegramNotifier
 	Strategy strategy.Strategy
+
+	newsCache     map[string][]strategy.News
+	lastNewsFetch map[string]time.Time
+	mlastMarketFetch time.Time
+	marketCache   strategy.MarketContext
 }
 
 func NewRunner(cfg *config.Config, client *alpaca.AlpacaClient, n *notifier.TelegramNotifier, s strategy.Strategy) *Runner {
 	return &Runner{
-		Config:   cfg,
-		Client:   client,
-		Notifier: n,
-		Strategy: s,
+		Config:        cfg,
+		Client:        client,
+		Notifier:      n,
+		Strategy:      s,
+		newsCache:     make(map[string][]strategy.News),
+		lastNewsFetch: make(map[string]time.Time),
 	}
 }
 
@@ -49,27 +56,56 @@ func (r *Runner) process() {
 		// return 
 	}
 
-	for _, symbol := range r.Config.Symbols {
-		// 1. 데이터 수집 (일봉 100개)
-		candles, err := r.Client.GetDailyCandles(symbol, 100)
+	// 1. 시장 지수 데이터 (5분 캐시)
+	if time.Since(r.mlastMarketFetch) > 5*time.Minute {
+		mc, err := r.Client.GetMarketContext()
 		if err != nil {
-			fmt.Printf("[%s] 데이터 수집 실패: %v\n", symbol, err)
+			fmt.Printf("[market] 시장 지수 수집 실패: %v\n", err)
+		} else {
+			r.marketCache = mc
+			r.mlastMarketFetch = time.Now()
+		}
+	}
+
+	for _, symbol := range r.Config.Symbols {
+		// 2. 차트 데이터 수집 (Timeframe 기반 60개)
+		candles, err := r.Client.GetCandles(symbol, 60, r.Config.Timeframe)
+		if err != nil {
+			fmt.Printf("[%s] %s 차트 수집 실패: %v\n", symbol, r.Config.Timeframe, err)
 			continue
 		}
 
-		// 2. 전략 계산
-		sig := r.Strategy.Calculate(candles)
-		if sig == strategy.SignalNone {
+		// 3. 뉴스 데이터 수집 (캐싱: 1시간마다)
+		if time.Since(r.lastNewsFetch[symbol]) > time.Hour {
+			fetchedNews, err := r.Client.GetNews(symbol, 3)
+			if err != nil {
+				fmt.Printf("[%s] 뉴스 수집 실패: %v\n", symbol, err)
+			} else {
+				r.newsCache[symbol] = fetchedNews
+				r.lastNewsFetch[symbol] = time.Now()
+			}
+		}
+		news := r.newsCache[symbol]
+
+		// 4. 스냅샷 (현재 호가 + VWAP + 전일 종가)
+		snap, err := r.Client.GetSnapshot(symbol)
+		if err != nil {
+			fmt.Printf("[%s] 스냅샷 수집 실패: %v\n", symbol, err)
+		}
+
+		// 5. 전략 계산
+		sig := r.Strategy.Calculate(symbol, candles, news, snap, r.marketCache)
+		if sig.Result == strategy.SignalNone {
 			continue
 		}
 
-		// 3. 매매 결정 및 실행
+		// 6. 매매 결정 및 실행
 		r.handleSignal(symbol, sig, isOpen)
 	}
 }
 
 func (r *Runner) handleSignal(symbol string, sig strategy.Signal, isOpen bool) {
-	msg := fmt.Sprintf("📢 [%s] 시그널 발생: %s", symbol, sig.String())
+	msg := fmt.Sprintf("📢 [%s] 시그널 발생: %s\n🔍 확신도: %d%%\n🔍 근거: %s", symbol, sig.Result.String(), sig.Strength, sig.Reason)
 	fmt.Println(msg)
 
 	if r.Config.DryRun {
@@ -83,7 +119,7 @@ func (r *Runner) handleSignal(symbol string, sig strategy.Signal, isOpen bool) {
 	}
 
 	// 실제 매매 (1주)
-	isBuy := (sig == strategy.SignalBuy)
+	isBuy := (sig.Result == strategy.SignalBuy)
 	resp, err := r.Client.Order(symbol, 1.0, isBuy)
 	if err != nil {
 		r.Notifier.Notify(fmt.Sprintf("❌ [%s] 주문 실패: %v", symbol, err))

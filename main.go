@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/park/tradingbot/internal/exchange/alpaca"
 	"github.com/park/tradingbot/internal/notifier"
 	"github.com/park/tradingbot/internal/strategy"
+	"google.golang.org/genai"
 )
 
 func main() {
@@ -41,13 +43,24 @@ func main() {
 		ntf, _ = notifier.NewTelegramNotifier("", 0) // 설정으로 껐을 경우 로그로 대체
 	}
 
-	// 5. 전략 선택
-	var selectedStrategy strategy.Strategy
-	switch cfg.Strategy {
-	case "RSI":
-		selectedStrategy = &strategy.RSIStrategy{Period: 14, Overbought: 70, Oversold: 30}
-	default:
-		selectedStrategy = &strategy.MACrossStrategy{ShortPeriod: 5, LongPeriod: 20}
+	// 5. AI 전략 초기화
+	ctx := context.Background()
+	gClient, gErr := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey: cfg.GeminiAPIKey,
+	})
+	if gErr != nil {
+		log.Fatalf("Gemini 클라이언트 초기화 실패: %v", gErr)
+	}
+
+	model := cfg.GeminiModel
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	selectedStrategy := &strategy.AIStrategy{
+		Client:    gClient,
+		Model:     model,
+		Timeframe: cfg.Timeframe,
 	}
 
 	// 6. 엔진 실행

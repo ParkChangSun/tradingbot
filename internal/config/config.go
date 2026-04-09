@@ -12,11 +12,14 @@ type Config struct {
 	AlpacaBaseURL   string
 	AlpacaAPIKey    string
 	AlpacaAPISecret string
+	GeminiAPIKey    string
+	GeminiModel     string
 	TelegramToken   string
 	TelegramChatID  int64
 	EnableTelegram  bool
 	DryRun          bool
 	Strategy        string
+	Timeframe       string
 	Symbols         []string
 	IntervalSeconds int
 }
@@ -49,15 +52,24 @@ func LoadConfig() (*Config, error) {
 		baseURL = "https://paper-api.alpaca.markets"
 	}
 
+	strategy := os.Getenv("STRATEGY")
+	timeframe := os.Getenv("TIMEFRAME")
+	if timeframe == "" {
+		timeframe = "1Min"
+	}
+
 	return &Config{
 		AlpacaBaseURL:   baseURL,
-		AlpacaAPIKey:    os.Getenv("ALPACA_API_KEY"),
-		AlpacaAPISecret: os.Getenv("ALPACA_API_SECRET"),
-		TelegramToken:   os.Getenv("TELEGRAM_TOKEN"),
+		AlpacaAPIKey:    strings.TrimSpace(os.Getenv("ALPACA_API_KEY")),
+		AlpacaAPISecret: strings.TrimSpace(os.Getenv("ALPACA_API_SECRET")),
+		GeminiAPIKey:    strings.TrimSpace(os.Getenv("GEMINI_API_KEY")),
+		GeminiModel:     strings.TrimSpace(os.Getenv("GEMINI_MODEL")),
+		TelegramToken:   strings.TrimSpace(os.Getenv("TELEGRAM_TOKEN")),
 		TelegramChatID:  chatID,
 		EnableTelegram:  enableTg,
 		DryRun:          dryRun,
-		Strategy:        os.Getenv("STRATEGY"),
+		Strategy:        strategy,
+		Timeframe:       timeframe,
 		Symbols:         symbols,
 		IntervalSeconds: interval,
 	}, nil
