@@ -9,7 +9,13 @@ import (
 const startedMessage = "trading bot started"
 
 func main() {
+	if _, err := loadConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	if err := run(os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
