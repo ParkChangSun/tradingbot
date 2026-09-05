@@ -21,6 +21,14 @@ Do not assume the final architecture, trading strategy, or package structure unl
 - Do not make unrelated changes.
 - Prefer simple solutions over premature abstractions.
 
+## Version Control
+
+- Normally use a short-lived branch for implementation work instead of committing directly to `main`.
+- Review the complete branch diff against its target branch before merging.
+- Write commit messages as `<type>: <imperative summary>`.
+- Use `feat`, `fix`, `test`, `docs`, `refactor`, or `chore` when one of these types fits.
+- Keep each commit focused on one logical change.
+
 ## Planning
 
 When asked to plan:
@@ -46,16 +54,20 @@ When asked to implement:
 - Use Alpaca Paper Trading by default.
 - Do not enable live trading unless explicitly requested.
 - Never hard-code or expose API credentials.
+- Store real credentials only in process environment variables or ignored local `.env` files.
+- Keep only placeholder values in `.env.example`.
+- Use fake credentials and temporary files in tests.
+- Never log secret values or an entire configuration object that contains them.
 - Do not silently ignore errors.
 
 ## Validation
 
-Run when applicable:
+For Go changes, format each changed `.go` file with `gofmt -w`, then run:
 
 ```bash
-gofmt -w .
 go vet ./...
 go test ./...
 ```
 
+Report any skipped or failed check and distinguish code failures from execution-environment failures.
 Never claim that a command passed unless it was actually executed.
