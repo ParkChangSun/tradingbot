@@ -9,6 +9,11 @@ import (
 const startedMessage = "trading bot started"
 
 func main() {
+	if err := loadEnvironmentFile(defaultEnvFile); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	if _, err := loadConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
