@@ -10,7 +10,7 @@ Copy the example environment file and add your Alpaca Paper Trading credentials:
 cp .env.example .env
 ```
 
-Then start the bot:
+Then run one daily cycle:
 
 ```bash
 go run .
@@ -28,9 +28,22 @@ export APCA_API_SECRET_KEY="your-paper-api-secret"
 go run .
 ```
 
-The API base URL defaults to Alpaca Paper Trading
-(`https://paper-api.alpaca.markets`). To override it, set
-`APCA_API_BASE_URL`.
+The bot always uses the Alpaca Paper Trading API at
+`https://paper-api.alpaca.markets`. Only credentials are configurable.
+
+## Daily cycle
+
+Each invocation runs a single cycle. It reads the US market clock first and
+stops when the market is closed. When the market is open, it reads the account,
+positions, and open orders before evaluating a decision policy.
+
+The current production policy always holds. The broker boundary exposes no
+order-submission method, so buy and sell orders cannot be sent until strategy,
+position sizing, and risk rules are deliberately added. Any existing open order
+also stops policy evaluation as a conservative duplicate-order safeguard.
+
+Scheduling, live order execution, notifications, and strategy selection are
+outside the current scope.
 
 ## Test
 

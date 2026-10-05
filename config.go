@@ -8,28 +8,19 @@ import (
 )
 
 const (
-	apiKeyEnv     = "APCA_API_KEY_ID"
-	apiSecretEnv  = "APCA_API_SECRET_KEY"
-	apiBaseURLEnv = "APCA_API_BASE_URL"
-
-	defaultAPIBaseURL = "https://paper-api.alpaca.markets"
+	apiKeyEnv    = "APCA_API_KEY_ID"
+	apiSecretEnv = "APCA_API_SECRET_KEY"
 )
 
 type Config struct {
-	APIKey     string
-	APISecret  string
-	APIBaseURL string
+	APIKey    string
+	APISecret string
 }
 
 func loadConfig() (Config, error) {
 	config := Config{
-		APIKey:     strings.TrimSpace(os.Getenv(apiKeyEnv)),
-		APISecret:  strings.TrimSpace(os.Getenv(apiSecretEnv)),
-		APIBaseURL: strings.TrimSpace(os.Getenv(apiBaseURLEnv)),
-	}
-
-	if config.APIBaseURL == "" {
-		config.APIBaseURL = defaultAPIBaseURL
+		APIKey:    strings.TrimSpace(os.Getenv(apiKeyEnv)),
+		APISecret: strings.TrimSpace(os.Getenv(apiSecretEnv)),
 	}
 
 	var validationErrors []error
