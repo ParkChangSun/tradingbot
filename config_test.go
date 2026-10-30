@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadConfig(t *testing.T) {
+	t.Setenv(tradingSymbolEnv, "aapl")
 	t.Setenv(apiKeyEnv, "test-key")
 	t.Setenv(apiSecretEnv, "test-secret")
 
@@ -14,6 +15,9 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatalf("loadConfig returned error: %v", err)
 	}
 
+	if config.TradingSymbol != "AAPL" {
+		t.Errorf("symbol = %q", config.TradingSymbol)
+	}
 	if config.APIKey != "test-key" {
 		t.Errorf("APIKey = %q, want %q", config.APIKey, "test-key")
 	}
@@ -23,6 +27,7 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestLoadConfigReportsAllMissingRequiredValues(t *testing.T) {
+	t.Setenv(tradingSymbolEnv, " ")
 	t.Setenv(apiKeyEnv, "")
 	t.Setenv(apiSecretEnv, "   ")
 
@@ -35,6 +40,7 @@ func TestLoadConfigReportsAllMissingRequiredValues(t *testing.T) {
 		"invalid configuration",
 		apiKeyEnv + " is required",
 		apiSecretEnv + " is required",
+		tradingSymbolEnv + " is required",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
@@ -43,6 +49,7 @@ func TestLoadConfigReportsAllMissingRequiredValues(t *testing.T) {
 }
 
 func TestLoadConfigTrimsValues(t *testing.T) {
+	t.Setenv(tradingSymbolEnv, " brk.b ")
 	t.Setenv(apiKeyEnv, "  test-key  ")
 	t.Setenv(apiSecretEnv, "  test-secret  ")
 
@@ -56,5 +63,15 @@ func TestLoadConfigTrimsValues(t *testing.T) {
 	}
 	if config.APISecret != "test-secret" {
 		t.Errorf("APISecret = %q, want %q", config.APISecret, "test-secret")
+	}
+}
+
+func TestLoadConfigNormalizesSymbol(t *testing.T) {
+	t.Setenv(apiKeyEnv, "key")
+	t.Setenv(apiSecretEnv, "secret")
+	t.Setenv(tradingSymbolEnv, " brk.b ")
+	config, err := loadConfig()
+	if err != nil || config.TradingSymbol != "BRK.B" {
+		t.Fatalf("symbol=%q error=%v", config.TradingSymbol, err)
 	}
 }

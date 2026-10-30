@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -170,6 +172,10 @@ type alpacaTransport struct {
 }
 
 func (t alpacaTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	*t.requestID = ""
+	if err := t.ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Keep the HTTP client's timeout context while adding caller cancellation.
 	ctx, cancel := context.WithCancel(request.Context())
 	stop := context.AfterFunc(t.ctx, cancel)
@@ -187,19 +193,43 @@ func (t alpacaTransport) RoundTrip(request *http.Request) (*http.Response, error
 		return nil, err
 	}
 	*t.requestID = response.Header.Get("X-Request-ID")
-	response.Body = &limitedAlpacaBody{Reader: io.LimitReader(response.Body, maxAlpacaResponseSize), Closer: response.Body, cleanup: cleanup}
+	// Buffer a bounded decoded body and close it here: the market-data SDK does
+	// not close successful response bodies itself. This also bounds gzip output.
+	defer cleanup()
+	body, err := readAlpacaResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Del("Content-Length")
 	return response, nil
 }
 
-type limitedAlpacaBody struct {
-	io.Reader
-	io.Closer
-	cleanup func()
-}
-
-func (b *limitedAlpacaBody) Close() error {
-	defer b.cleanup()
-	return b.Closer.Close()
+func readAlpacaResponse(response *http.Response) (body []byte, err error) {
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close Alpaca response: %w", closeErr))
+		}
+	}()
+	var reader io.Reader = response.Body
+	if response.Header.Get("Content-Encoding") == "gzip" {
+		decoded, decodeErr := gzip.NewReader(response.Body)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode Alpaca response: %w", decodeErr)
+		}
+		defer decoded.Close() // gzip.Reader.Close does not close the underlying body.
+		reader = decoded
+		response.Header.Del("Content-Encoding")
+	}
+	body, err = io.ReadAll(io.LimitReader(reader, maxAlpacaResponseSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Alpaca response: %w", err)
+	}
+	if len(body) > maxAlpacaResponseSize {
+		return nil, fmt.Errorf("Alpaca response exceeds %d bytes", maxAlpacaResponseSize)
+	}
+	return body, nil
 }
 
 func optionalDecimal(value *decimal.Decimal) string {

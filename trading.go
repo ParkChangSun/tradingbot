@@ -89,12 +89,12 @@ type DailySnapshot struct {
 	Account    AccountSnapshot
 	Positions  []Position
 	OpenOrders []OpenOrder
+	History    DailyHistory
 }
 
 type CycleOutcome string
 
 const (
-	OutcomeMarketClosed      CycleOutcome = "market_closed"
 	OutcomeTradingBlocked    CycleOutcome = "trading_blocked"
 	OutcomeOpenOrdersPresent CycleOutcome = "open_orders_present"
 	OutcomeNoAction          CycleOutcome = "no_action"
@@ -109,11 +109,13 @@ type CycleResult struct {
 }
 
 type DailyCycle struct {
-	broker Broker
-	policy DecisionPolicy
+	broker     Broker
+	policy     DecisionPolicy
+	marketData MarketData
+	symbol     string
 }
 
-func NewDailyCycle(broker Broker, policy DecisionPolicy) (*DailyCycle, error) {
+func NewDailyCycle(broker Broker, policy DecisionPolicy, marketData MarketData, symbol string) (*DailyCycle, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
@@ -121,7 +123,14 @@ func NewDailyCycle(broker Broker, policy DecisionPolicy) (*DailyCycle, error) {
 		return nil, fmt.Errorf("decision policy is required")
 	}
 
-	return &DailyCycle{broker: broker, policy: policy}, nil
+	if marketData == nil {
+		return nil, fmt.Errorf("market data is required")
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil, fmt.Errorf("symbol is required")
+	}
+	return &DailyCycle{broker: broker, policy: policy, marketData: marketData, symbol: symbol}, nil
 }
 
 func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
@@ -131,14 +140,10 @@ func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
 	}
 
 	result := CycleResult{
-		Outcome: OutcomeMarketClosed,
 		Snapshot: DailySnapshot{
 			Clock: clock,
 		},
 		DryRun: true,
-	}
-	if !clock.IsOpen {
-		return result, nil
 	}
 
 	account, err := c.broker.Account(ctx)
@@ -170,6 +175,20 @@ func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
 		result.Outcome = OutcomeOpenOrdersPresent
 		return result, nil
 	}
+
+	req, err := newHistoryRequest(c.symbol, clock.Timestamp)
+	if err != nil {
+		return CycleResult{}, err
+	}
+	bars, err := c.marketData.DailyBars(ctx, req)
+	if err != nil {
+		return CycleResult{}, fmt.Errorf("get daily history: %w", err)
+	}
+	bars, err = validateDailyBars(req, bars)
+	if err != nil {
+		return CycleResult{}, fmt.Errorf("validate daily history: %w", err)
+	}
+	result.Snapshot.History = DailyHistory{Symbol: c.symbol, Feed: dailyHistoryFeed, Adjustment: dailyHistoryAdjustment, Bars: bars}
 
 	decision, err := c.policy.Decide(ctx, result.Snapshot)
 	if err != nil {
