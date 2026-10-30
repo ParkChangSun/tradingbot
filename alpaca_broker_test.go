@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 )
 
 func TestNewAlpacaBrokerUsesPaperTradingURL(t *testing.T) {
@@ -103,7 +106,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 	}
 	wantAccount := AccountSnapshot{
 		ID: "account-1", Status: "ACTIVE", Currency: "USD",
-		BuyingPower: "25000.50", Equity: "20000.25", Cash: "5000.25",
+		BuyingPower: "25000.5", Equity: "20000.25", Cash: "5000.25",
 	}
 	if !reflect.DeepEqual(account, wantAccount) {
 		t.Errorf("Account = %#v, want %#v", account, wantAccount)
@@ -115,7 +118,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 	}
 	wantPositions := []Position{{
 		AssetID: "asset-1", Symbol: "AAPL", AssetClass: "us_equity",
-		Quantity: "2", Side: "long", MarketValue: "450.00",
+		Quantity: "2", Side: "long", MarketValue: "450",
 	}}
 	if !reflect.DeepEqual(positions, wantPositions) {
 		t.Errorf("Positions = %#v, want %#v", positions, wantPositions)
@@ -133,7 +136,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 		"/v2/clock",
 		"/v2/account",
 		"/v2/positions",
-		"/v2/orders?status=open&limit=500&direction=asc",
+		"/v2/orders?direction=asc&limit=500&nested=false&status=open",
 	}
 	if !reflect.DeepEqual(requestedPaths, wantPaths) {
 		t.Errorf("request paths = %v, want %v", requestedPaths, wantPaths)
@@ -143,7 +146,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 func TestAlpacaBrokerReportsAPIErrorWithoutCredentials(t *testing.T) {
 	const secret = "must-not-appear"
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		response := httpResponse(http.StatusForbidden, `{"message":"forbidden"}`)
+		response := httpResponse(http.StatusForbidden, `{"code":40310000,"message":"forbidden"}`)
 		response.Header.Set("X-Request-ID", "request-123")
 		return response, nil
 	})}
@@ -156,7 +159,11 @@ func TestAlpacaBrokerReportsAPIErrorWithoutCredentials(t *testing.T) {
 	if err == nil {
 		t.Fatal("Account returned nil error")
 	}
-	for _, want := range []string{"403 Forbidden", "request-123", "forbidden"} {
+	var apiError *alpaca.APIError
+	if !errors.As(err, &apiError) || apiError.StatusCode != 403 || apiError.Code != 40310000 {
+		t.Fatalf("error = %v, want typed SDK API error", err)
+	}
+	for _, want := range []string{"request-123", "forbidden"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
@@ -176,7 +183,7 @@ func TestAlpacaBrokerReportsMalformedResponse(t *testing.T) {
 		t.Fatalf("NewAlpacaBroker returned error: %v", err)
 	}
 	_, err = broker.Clock(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "decode Alpaca response") {
+	if err == nil || !strings.Contains(err.Error(), "Alpaca request failed") {
 		t.Fatalf("Clock error = %v, want decoding context", err)
 	}
 }
@@ -211,5 +218,129 @@ func httpResponse(statusCode int, body string) *http.Response {
 		Status:     fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestAlpacaBrokerPreservesPaperAndKeyAuthentication(t *testing.T) {
+	t.Setenv("APCA_API_BASE_URL", "https://api.alpaca.markets")
+	t.Setenv("APCA_API_OAUTH", "unrelated-token")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "paper-api.alpaca.markets" || r.Header.Get("Authorization") != "" || r.Header.Get("APCA-API-KEY-ID") != "key" || r.Header.Get("APCA-API-SECRET-KEY") != "secret" {
+			t.Error("paper host or explicit authentication changed")
+		}
+		return httpResponse(200, `{}`), nil
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.Account(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAlpacaBrokerDoesNotRetryRateLimits(t *testing.T) {
+	attempts := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return httpResponse(429, `{"code":42910000,"message":"rate limit exceeded"}`), nil
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = broker.Account(context.Background())
+	if err == nil || attempts != 1 {
+		t.Fatalf("error = %v, attempts = %d; want error and one attempt", err, attempts)
+	}
+}
+
+func TestAlpacaBrokerCancelsInFlightRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		cancel()
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = broker.Account(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+}
+
+func TestAlpacaBrokerPreservesHTTPTimeout(t *testing.T) {
+	client := &http.Client{Timeout: 10 * time.Millisecond, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = broker.Account(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want timeout", err)
+	}
+}
+
+func TestAlpacaBrokerHandlesNullDecimals(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v2/positions" {
+			return httpResponse(200, `[{"qty":"0.125","market_value":null}]`), nil
+		}
+		return httpResponse(200, `[{"qty":null,"notional":"100"}]`), nil
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	positions, err := broker.Positions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 1 || positions[0].Quantity != "0.125" || positions[0].MarketValue != "" {
+		t.Fatalf("positions = %#v", positions)
+	}
+	orders, err := broker.OpenOrders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].Quantity != "" {
+		t.Fatalf("orders = %#v", orders)
+	}
+}
+
+func TestAlpacaBrokerLimitsResponseSize(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(200, `{"id":"`+strings.Repeat("x", maxAlpacaResponseSize)+`"}`), nil
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.Account(context.Background()); err == nil {
+		t.Fatal("oversized response succeeded")
+	}
+}
+
+func TestAlpacaBrokerPreservesCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	broker, err := NewAlpacaBroker("key", "secret", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = broker.Account(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want caller deadline", err)
 	}
 }

@@ -31,6 +31,19 @@ go run .
 The bot always uses the Alpaca Paper Trading API at
 `https://paper-api.alpaca.markets`. Only credentials are configurable.
 
+The Alpaca adapter uses the official `alpaca-trade-api-go/v3` SDK, pinned to
+v3.11.0. It explicitly selects the paper URL and API-key authentication rather
+than inheriting SDK base-URL or OAuth environment settings. Each request retains
+the caller's cancellation, the CLI's 15-second HTTP timeout, and a 4 MiB response
+read limit. Automatic SDK retries are disabled, so a rate-limit response fails
+the cycle immediately. SDK API errors remain available through `errors.As`,
+with response request IDs included in error messages when present.
+
+SDK decimal values are converted to normalized strings in snapshots (for
+example, `"450.00"` becomes `"450"`). Nullable position market values and order
+quantities remain empty strings when unavailable. Open-order retrieval remains
+limited to one page of up to 500 orders.
+
 ## Daily cycle
 
 Each invocation runs a single cycle. It reads the US market clock first and
