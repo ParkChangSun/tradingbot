@@ -96,12 +96,13 @@ func (b *AlpacaBroker) Positions(ctx context.Context) ([]Position, error) {
 	positions := make([]Position, len(response))
 	for i, position := range response {
 		positions[i] = Position{
-			AssetID:     position.AssetID,
-			Symbol:      position.Symbol,
-			AssetClass:  string(position.AssetClass),
-			Quantity:    position.Qty.String(),
-			Side:        position.Side,
-			MarketValue: optionalDecimal(position.MarketValue),
+			AssetID:           position.AssetID,
+			Symbol:            position.Symbol,
+			AssetClass:        string(position.AssetClass),
+			Quantity:          position.Qty.String(),
+			Side:              position.Side,
+			MarketValue:       optionalDecimal(position.MarketValue),
+			AverageEntryPrice: position.AvgEntryPrice.String(),
 		}
 	}
 	return positions, nil

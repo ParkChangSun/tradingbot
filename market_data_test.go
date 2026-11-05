@@ -12,10 +12,24 @@ import (
 var testClockTime = time.Date(2026, 10, 30, 15, 0, 0, 0, time.UTC)
 
 type fakeMarketData struct {
-	calls   int
-	request HistoryRequest
-	failure error
-	bars    []DailyBar
+	calls        int
+	request      HistoryRequest
+	failure      error
+	bars         []DailyBar
+	quoteCalls   int
+	quote        LatestQuote
+	quoteFailure error
+}
+
+func (f *fakeMarketData) LatestQuote(_ context.Context, symbol string) (LatestQuote, error) {
+	f.quoteCalls++
+	if f.quoteFailure != nil {
+		return LatestQuote{}, f.quoteFailure
+	}
+	if f.quote.Symbol != "" {
+		return f.quote, nil
+	}
+	return LatestQuote{Symbol: symbol, Feed: "iex", Timestamp: testClockTime.Add(-time.Second), BidPrice: "99", AskPrice: "100"}, nil
 }
 
 func (f *fakeMarketData) DailyBars(_ context.Context, req HistoryRequest) ([]DailyBar, error) {
@@ -102,18 +116,15 @@ func TestValidateDailyBars(t *testing.T) {
 }
 func TestCycleMarketDataGuardsAndFailures(t *testing.T) {
 	for _, tt := range []struct {
-		name                              string
-		blocked, openOrder, badData, fail bool
-		wantCalls                         int
+		name                   string
+		blocked, badData, fail bool
+		wantCalls              int
 	}{
-		{name: "blocked", blocked: true}, {name: "open order", openOrder: true},
+		{name: "blocked", blocked: true},
 		{name: "API error", fail: true, wantCalls: 1}, {name: "validation error", badData: true, wantCalls: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			broker := &fakeBroker{account: AccountSnapshot{TradingBlocked: tt.blocked}}
-			if tt.openOrder {
-				broker.openOrders = []OpenOrder{{ID: "open"}}
-			}
 			data := &fakeMarketData{}
 			sentinel := errors.New("data unavailable")
 			if tt.fail {

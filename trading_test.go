@@ -104,7 +104,7 @@ func TestDailyCycleStopsWhenAccountIsTradingBlocked(t *testing.T) {
 	}
 }
 
-func TestDailyCycleStopsWhenOpenOrdersExist(t *testing.T) {
+func TestDailyCycleAnalyzesWithOpenOrders(t *testing.T) {
 	broker := &fakeBroker{
 		clock:      MarketClock{IsOpen: true},
 		openOrders: []OpenOrder{{ID: "order-1", Symbol: "AAPL"}},
@@ -116,11 +116,11 @@ func TestDailyCycleStopsWhenOpenOrdersExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if result.Outcome != OutcomeOpenOrdersPresent {
-		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeOpenOrdersPresent)
+	if result.Outcome != OutcomeDecisionReady {
+		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeDecisionReady)
 	}
-	if policy.calls != 0 {
-		t.Errorf("policy calls = %d, want 0", policy.calls)
+	if policy.calls != 1 || len(policy.snapshot.OpenOrders) != 1 {
+		t.Errorf("policy calls = %d, want 1 with open orders", policy.calls)
 	}
 }
 

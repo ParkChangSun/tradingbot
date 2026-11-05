@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
+	"github.com/shopspring/decimal"
 )
 
 const alpacaDataAPIBaseURL = "https://data.alpaca.markets"
@@ -32,8 +35,48 @@ func (m *AlpacaMarketData) DailyBars(ctx context.Context, req HistoryRequest) ([
 	if err := validateHistoryRequest(req); err != nil {
 		return nil, err
 	}
+	bars, err := callMarketData(m, ctx, func(sdk *marketdata.Client) ([]marketdata.Bar, error) {
+		return sdk.GetBars(req.Symbol, marketdata.GetBarsRequest{
+			TimeFrame: marketdata.OneDay, Start: req.Start, End: req.Cutoff.Add(-time.Nanosecond), TotalLimit: req.Count,
+			Feed: dailyHistoryFeed, Adjustment: marketdata.AdjustmentSplit, Sort: marketdata.SortDesc, Currency: "USD",
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get daily bars for %s: %w", req.Symbol, err)
+	}
+	result := make([]DailyBar, len(bars))
+	for i, bar := range bars {
+		result[i] = DailyBar{Timestamp: bar.Timestamp, Open: bar.Open, High: bar.High, Low: bar.Low, Close: bar.Close, Volume: bar.Volume}
+	}
+	return result, nil
+}
+
+func (m *AlpacaMarketData) LatestQuote(ctx context.Context, symbol string) (LatestQuote, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return LatestQuote{}, fmt.Errorf("quote symbol is required")
+	}
+	quote, err := callMarketData(m, ctx, func(sdk *marketdata.Client) (*marketdata.Quote, error) {
+		return sdk.GetLatestQuote(symbol, marketdata.GetLatestQuoteRequest{Feed: dailyHistoryFeed, Currency: "USD"})
+	})
+	if err != nil {
+		return LatestQuote{}, fmt.Errorf("get latest quote for %s: %w", symbol, err)
+	}
+	if quote == nil {
+		return LatestQuote{}, fmt.Errorf("latest quote is missing for %s", symbol)
+	}
+	if math.IsNaN(quote.BidPrice) || math.IsInf(quote.BidPrice, 0) || math.IsNaN(quote.AskPrice) || math.IsInf(quote.AskPrice, 0) {
+		return LatestQuote{}, fmt.Errorf("quote contains non-finite prices")
+	}
+	return LatestQuote{Symbol: symbol, Feed: dailyHistoryFeed, Timestamp: quote.Timestamp, BidPrice: decimal.NewFromFloat(quote.BidPrice).String(), AskPrice: decimal.NewFromFloat(quote.AskPrice).String()}, nil
+}
+
+// Share the existing explicit authentication, bounded transport and cancellation
+// behavior across history and quote requests. No feed or endpoint fallback.
+func callMarketData[T any](m *AlpacaMarketData, ctx context.Context, call func(*marketdata.Client) (T, error)) (T, error) {
+	var zero T
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return zero, err
 	}
 	b := m.connection
 	transport := b.client.Transport
@@ -47,22 +90,15 @@ func (m *AlpacaMarketData) DailyBars(ctx context.Context, req HistoryRequest) ([
 		APIKey: b.apiKey, APISecret: b.apiSecret, BaseURL: b.baseURL,
 		HTTPClient: &client, RetryLimit: -1,
 	})
-	bars, err := sdk.GetBars(req.Symbol, marketdata.GetBarsRequest{
-		TimeFrame: marketdata.OneDay, Start: req.Start, End: req.Cutoff.Add(-time.Nanosecond), TotalLimit: req.Count,
-		Feed: dailyHistoryFeed, Adjustment: marketdata.AdjustmentSplit, Sort: marketdata.SortDesc, Currency: "USD",
-	})
+	result, err := call(sdk)
 	if err != nil {
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
 		}
 		if requestID != "" {
-			return nil, fmt.Errorf("get daily bars for %s (request ID %s): %w", req.Symbol, requestID, err)
+			return zero, fmt.Errorf("market data request (request ID %s): %w", requestID, err)
 		}
-		return nil, fmt.Errorf("get daily bars for %s: %w", req.Symbol, err)
-	}
-	result := make([]DailyBar, len(bars))
-	for i, bar := range bars {
-		result[i] = DailyBar{Timestamp: bar.Timestamp, Open: bar.Open, High: bar.High, Low: bar.Low, Close: bar.Close, Volume: bar.Volume}
+		return zero, err
 	}
 	return result, nil
 }

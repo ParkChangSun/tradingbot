@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,22 +37,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), os.Stdout, broker, HoldPolicy{}, marketData, config.TradingSymbol); err != nil {
+	var policy DecisionPolicy = HoldPolicy{}
+	if config.DecisionPolicy == "openai" {
+		policy, err = NewOpenAIPolicy(config.OpenAIKey, config.OpenAIModel, config.CycleBudgetNanodollars,
+			&http.Client{Timeout: 60 * time.Second}, FileRecommendationJournal{Directory: config.RecommendationDirectory})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if err := run(context.Background(), os.Stdout, broker, policy, marketData, config.TradingSymbol, config.PlannerLimits); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, w io.Writer, broker Broker, policy DecisionPolicy, marketData MarketData, symbol string) error {
+func run(ctx context.Context, w io.Writer, broker Broker, policy DecisionPolicy, marketData MarketData, symbol string, limits PlannerLimits) error {
+	if err := limits.validate(); err != nil {
+		return err
+	}
 	cycle, err := NewDailyCycle(broker, policy, marketData, symbol)
 	if err != nil {
 		return err
 	}
-
 	result, err := cycle.Run(ctx)
 	if err != nil {
 		return err
 	}
+	plan, planErr := refreshOrderPlan(ctx, broker, marketData, result.Decision, cycle.symbol, result.Snapshot.Account.ID, limits)
 
 	historySummary := "history=skipped"
 	if history := result.Snapshot.History; len(history.Bars) > 0 {
@@ -58,12 +72,29 @@ func run(ctx context.Context, w io.Writer, broker Broker, policy DecisionPolicy,
 	}
 	_, err = fmt.Fprintf(
 		w,
-		"daily cycle outcome=%s dry_run=%t positions=%d open_orders=%d market_open=%t %s\n",
+		"daily cycle outcome=%s dry_run=%t execution=disabled risk_limits=preview_configured plan=%s positions=%d open_orders=%d market_open=%t %s\n",
 		result.Outcome,
 		result.DryRun,
+		plan.Status,
 		len(result.Snapshot.Positions),
 		len(result.Snapshot.OpenOrders),
 		result.Snapshot.Clock.IsOpen, historySummary,
 	)
-	return err
+	if err != nil {
+		return errors.Join(err, planErr)
+	}
+	if result.Decision.RecordID != "" {
+		err = json.NewEncoder(w).Encode(struct {
+			RecordID       string           `json:"record_id"`
+			Recommendation Decision         `json:"recommendation"`
+			Validation     ValidationReport `json:"validation"`
+			Usage          *TokenUsage      `json:"usage"`
+			Plan           OrderPlan        `json:"order_plan"`
+		}{result.Decision.RecordID, result.Decision, executionDisabled("valid", result.Snapshot), result.Decision.Usage, plan})
+	} else {
+		err = json.NewEncoder(w).Encode(struct {
+			Plan OrderPlan `json:"order_plan"`
+		}{plan})
+	}
+	return errors.Join(err, planErr)
 }

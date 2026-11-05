@@ -36,6 +36,20 @@ type DailyHistory struct {
 
 type MarketData interface {
 	DailyBars(context.Context, HistoryRequest) ([]DailyBar, error) // Newest first.
+	QuoteSource
+}
+
+// Quote prices are decimal strings for exact dry-run sizing, not daily-bar floats.
+type LatestQuote struct {
+	Symbol    string    `json:"symbol"`
+	Feed      string    `json:"feed"`
+	Timestamp time.Time `json:"timestamp"`
+	BidPrice  string    `json:"bid_price"`
+	AskPrice  string    `json:"ask_price"`
+}
+
+type QuoteSource interface {
+	LatestQuote(context.Context, string) (LatestQuote, error)
 }
 
 func newHistoryRequest(symbol string, now time.Time) (HistoryRequest, error) {

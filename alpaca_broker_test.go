@@ -77,7 +77,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 		case "/v2/account":
 			body = `{"id":"account-1","status":"ACTIVE","currency":"USD","buying_power":"25000.50","equity":"20000.25","cash":"5000.25","trading_blocked":false}`
 		case "/v2/positions":
-			body = `[{"asset_id":"asset-1","symbol":"AAPL","asset_class":"us_equity","qty":"2","side":"long","market_value":"450.00"}]`
+			body = `[{"asset_id":"asset-1","symbol":"AAPL","asset_class":"us_equity","qty":"2","side":"long","market_value":"450.00","avg_entry_price":"200.50"}]`
 		case "/v2/orders":
 			body = `[{"id":"order-1","client_order_id":"daily-1","symbol":"MSFT","asset_class":"us_equity","side":"buy","qty":"1","status":"accepted","submitted_at":"2026-09-08T14:01:02Z"}]`
 		default:
@@ -118,7 +118,7 @@ func TestAlpacaBrokerRetrievesDailySnapshots(t *testing.T) {
 	}
 	wantPositions := []Position{{
 		AssetID: "asset-1", Symbol: "AAPL", AssetClass: "us_equity",
-		Quantity: "2", Side: "long", MarketValue: "450",
+		Quantity: "2", Side: "long", MarketValue: "450", AverageEntryPrice: "200.5",
 	}}
 	if !reflect.DeepEqual(positions, wantPositions) {
 		t.Errorf("Positions = %#v, want %#v", positions, wantPositions)

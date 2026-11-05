@@ -18,12 +18,12 @@ func TestRunPrintsCycleResult(t *testing.T) {
 	}
 	var output bytes.Buffer
 
-	if err := run(context.Background(), &output, broker, HoldPolicy{}, &fakeMarketData{}, "AAPL"); err != nil {
+	if err := run(context.Background(), &output, broker, HoldPolicy{}, &fakeMarketData{}, "AAPL", defaultPlannerLimits()); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	const want = "daily cycle outcome=no_action dry_run=true positions=1 open_orders=0 market_open=true history=ready symbol=AAPL bars=20 latest_bar=2026-10-29 feed=iex adjustment=split\n"
-	if got := output.String(); got != want {
+	const want = "daily cycle outcome=no_action dry_run=true execution=disabled risk_limits=preview_configured plan=no_trade positions=1 open_orders=0 market_open=true history=ready symbol=AAPL bars=20 latest_bar=2026-10-29 feed=iex adjustment=split\n"
+	if got := output.String(); !strings.HasPrefix(got, want) || !strings.Contains(got, `"status":"no_trade"`) {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
@@ -32,11 +32,11 @@ func TestRunPrintsGuardedCycle(t *testing.T) {
 	broker := &fakeBroker{account: AccountSnapshot{TradingBlocked: true}}
 	data := &fakeMarketData{}
 	var output bytes.Buffer
-	if err := run(context.Background(), &output, broker, HoldPolicy{}, data, "AAPL"); err != nil {
+	if err := run(context.Background(), &output, broker, HoldPolicy{}, data, "AAPL", defaultPlannerLimits()); err != nil {
 		t.Fatal(err)
 	}
-	const want = "daily cycle outcome=trading_blocked dry_run=true positions=0 open_orders=0 market_open=false history=skipped\n"
-	if output.String() != want || data.calls != 0 {
+	const want = "daily cycle outcome=trading_blocked dry_run=true execution=disabled risk_limits=preview_configured plan=not_requested positions=0 open_orders=0 market_open=false history=skipped\n"
+	if !strings.HasPrefix(output.String(), want) || !strings.Contains(output.String(), `"status":"not_requested"`) || data.calls != 0 {
 		t.Fatalf("output=%q data calls=%d", output.String(), data.calls)
 	}
 }
@@ -54,7 +54,7 @@ func TestRunPrintsClosedMarketHistoryDate(t *testing.T) {
 		bars[i].Timestamp = bars[i].Timestamp.UTC()
 	}
 	var output bytes.Buffer
-	if err := run(context.Background(), &output, broker, HoldPolicy{}, &fakeMarketData{bars: bars}, "AAPL"); err != nil {
+	if err := run(context.Background(), &output, broker, HoldPolicy{}, &fakeMarketData{bars: bars}, "AAPL", defaultPlannerLimits()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "market_open=false history=ready symbol=AAPL bars=20 latest_bar=2026-10-28") {
@@ -67,7 +67,7 @@ type failingWriter struct{ err error }
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 func TestRunPropagatesOutputError(t *testing.T) {
 	failure := errors.New("write failed")
-	err := run(context.Background(), failingWriter{failure}, &fakeBroker{}, HoldPolicy{}, &fakeMarketData{}, "AAPL")
+	err := run(context.Background(), failingWriter{failure}, &fakeBroker{}, HoldPolicy{}, &fakeMarketData{}, "AAPL", defaultPlannerLimits())
 	if !errors.Is(err, failure) {
 		t.Fatalf("error=%v", err)
 	}
