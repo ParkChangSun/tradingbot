@@ -25,7 +25,7 @@ func TestNewDailyCycleValidatesDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewDailyCycle(tt.broker, tt.policy)
+			_, err := NewDailyCycle(tt.broker, tt.policy, &fakeMarketData{}, "AAPL")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("NewDailyCycle error = %v, want containing %q", err, tt.want)
 			}
@@ -33,27 +33,27 @@ func TestNewDailyCycleValidatesDependencies(t *testing.T) {
 	}
 }
 
-func TestDailyCycleStopsWhenMarketIsClosed(t *testing.T) {
+func TestDailyCycleAnalyzesWhenMarketIsClosed(t *testing.T) {
 	now := time.Date(2026, time.September, 6, 12, 0, 0, 0, time.UTC)
 	broker := &fakeBroker{clock: MarketClock{Timestamp: now, IsOpen: false}}
-	policy := &fakePolicy{}
+	policy := &fakePolicy{decision: Decision{Action: DecisionHold}}
 	cycle := mustDailyCycle(t, broker, policy)
 
 	result, err := cycle.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if result.Outcome != OutcomeMarketClosed {
-		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeMarketClosed)
+	if result.Outcome != OutcomeNoAction {
+		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeNoAction)
 	}
 	if !result.DryRun {
 		t.Error("DryRun = false, want true")
 	}
-	if !reflect.DeepEqual(broker.calls, []string{"clock"}) {
-		t.Errorf("broker calls = %v, want [clock]", broker.calls)
+	if !reflect.DeepEqual(broker.calls, []string{"clock", "account", "positions", "open_orders"}) {
+		t.Errorf("broker calls = %v, want full snapshot retrieval", broker.calls)
 	}
-	if policy.calls != 0 {
-		t.Errorf("policy calls = %d, want 0", policy.calls)
+	if policy.calls != 1 || len(policy.snapshot.History.Bars) != dailyHistoryCount || policy.snapshot.Clock.IsOpen {
+		t.Errorf("closed-market analysis missing: calls=%d snapshot=%#v", policy.calls, policy.snapshot)
 	}
 }
 
@@ -104,7 +104,7 @@ func TestDailyCycleStopsWhenAccountIsTradingBlocked(t *testing.T) {
 	}
 }
 
-func TestDailyCycleStopsWhenOpenOrdersExist(t *testing.T) {
+func TestDailyCycleAnalyzesWithOpenOrders(t *testing.T) {
 	broker := &fakeBroker{
 		clock:      MarketClock{IsOpen: true},
 		openOrders: []OpenOrder{{ID: "order-1", Symbol: "AAPL"}},
@@ -116,11 +116,11 @@ func TestDailyCycleStopsWhenOpenOrdersExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if result.Outcome != OutcomeOpenOrdersPresent {
-		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeOpenOrdersPresent)
+	if result.Outcome != OutcomeDecisionReady {
+		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeDecisionReady)
 	}
-	if policy.calls != 0 {
-		t.Errorf("policy calls = %d, want 0", policy.calls)
+	if policy.calls != 1 || len(policy.snapshot.OpenOrders) != 1 {
+		t.Errorf("policy calls = %d, want 1 with open orders", policy.calls)
 	}
 }
 
@@ -239,7 +239,11 @@ func (b *fakeBroker) Clock(context.Context) (MarketClock, error) {
 	if b.failCall == "clock" {
 		return MarketClock{}, b.failure
 	}
-	return b.clock, nil
+	clock := b.clock
+	if clock.Timestamp.IsZero() {
+		clock.Timestamp = testClockTime
+	}
+	return clock, nil
 }
 
 func (b *fakeBroker) Account(context.Context) (AccountSnapshot, error) {
@@ -281,7 +285,7 @@ func (p *fakePolicy) Decide(_ context.Context, snapshot DailySnapshot) (Decision
 
 func mustDailyCycle(t *testing.T, broker Broker, policy DecisionPolicy) *DailyCycle {
 	t.Helper()
-	cycle, err := NewDailyCycle(broker, policy)
+	cycle, err := NewDailyCycle(broker, policy, &fakeMarketData{}, "AAPL")
 	if err != nil {
 		t.Fatalf("NewDailyCycle returned error: %v", err)
 	}

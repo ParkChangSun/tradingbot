@@ -14,6 +14,7 @@ tradingbot
 .env.*
 !.env.example
 .tradingbot-daily-state.json
+.tradingbot-recommendations/
 
 # Editor directories and files
 .idea/

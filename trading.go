@@ -8,7 +8,8 @@ import (
 )
 
 // Broker exposes only the read operations needed to build a daily snapshot.
-// Order submission is intentionally absent until the trading policy is defined.
+// Order submission is intentionally absent. Preview constraints do not constitute
+// a complete execution or risk policy.
 type Broker interface {
 	Clock(context.Context) (MarketClock, error)
 	Account(context.Context) (AccountSnapshot, error)
@@ -34,12 +35,14 @@ type AccountSnapshot struct {
 }
 
 type Position struct {
-	AssetID     string
-	Symbol      string
-	AssetClass  string
-	Quantity    string
-	Side        string
-	MarketValue string
+	AssetID           string
+	Symbol            string
+	AssetClass        string
+	Quantity          string
+	Side              string
+	MarketValue       string
+	AverageEntryPrice string
+	PortfolioWeight   string // Signed market value / account equity; calculated for AI context.
 }
 
 type OpenOrder struct {
@@ -61,26 +64,33 @@ const (
 	DecisionSell DecisionAction = "sell"
 )
 
-// Decision describes directional intent only. It deliberately has no quantity,
-// order type, or time-in-force because those policies have not been selected.
+// Decision describes directional intent only. The program's planner owns preview
+// quantities; executable order type and time-in-force remain undecided.
 type Decision struct {
-	Action    DecisionAction
-	Symbol    string
-	Rationale string
+	Action                   DecisionAction `json:"action"`
+	Symbol                   string         `json:"symbol"`
+	Rationale                string         `json:"rationale"`
+	ExpectedHoldingSessions  *int           `json:"expected_holding_sessions"`
+	ReassessmentConditions   []string       `json:"reassessment_conditions"`
+	NextReviewDate           string         `json:"next_review_date"`
+	PreviousRecommendationID *string        `json:"previous_recommendation_id"`
+	ChangeExplanation        string         `json:"change_explanation"`
+	RecordID                 string         `json:"-"`
+	Usage                    *TokenUsage    `json:"-"`
 }
 
 type DecisionPolicy interface {
 	Decide(context.Context, DailySnapshot) (Decision, error)
 }
 
-// HoldPolicy is the production default while strategy and risk rules remain
-// undecided. It guarantees that the wired application cannot request a trade.
+// HoldPolicy is the default when AI recommendations are not enabled. It always
+// holds; neither policy has access to order submission.
 type HoldPolicy struct{}
 
 func (HoldPolicy) Decide(context.Context, DailySnapshot) (Decision, error) {
 	return Decision{
 		Action:    DecisionHold,
-		Rationale: "order submission is disabled until strategy and risk rules are configured",
+		Rationale: "AI recommendations are not enabled; order submission is not implemented",
 	}, nil
 }
 
@@ -89,16 +99,15 @@ type DailySnapshot struct {
 	Account    AccountSnapshot
 	Positions  []Position
 	OpenOrders []OpenOrder
+	History    DailyHistory
 }
 
 type CycleOutcome string
 
 const (
-	OutcomeMarketClosed      CycleOutcome = "market_closed"
-	OutcomeTradingBlocked    CycleOutcome = "trading_blocked"
-	OutcomeOpenOrdersPresent CycleOutcome = "open_orders_present"
-	OutcomeNoAction          CycleOutcome = "no_action"
-	OutcomeDecisionReady     CycleOutcome = "decision_ready"
+	OutcomeTradingBlocked CycleOutcome = "trading_blocked"
+	OutcomeNoAction       CycleOutcome = "no_action"
+	OutcomeDecisionReady  CycleOutcome = "decision_ready"
 )
 
 type CycleResult struct {
@@ -109,11 +118,13 @@ type CycleResult struct {
 }
 
 type DailyCycle struct {
-	broker Broker
-	policy DecisionPolicy
+	broker     Broker
+	policy     DecisionPolicy
+	marketData MarketData
+	symbol     string
 }
 
-func NewDailyCycle(broker Broker, policy DecisionPolicy) (*DailyCycle, error) {
+func NewDailyCycle(broker Broker, policy DecisionPolicy, marketData MarketData, symbol string) (*DailyCycle, error) {
 	if broker == nil {
 		return nil, fmt.Errorf("broker is required")
 	}
@@ -121,7 +132,14 @@ func NewDailyCycle(broker Broker, policy DecisionPolicy) (*DailyCycle, error) {
 		return nil, fmt.Errorf("decision policy is required")
 	}
 
-	return &DailyCycle{broker: broker, policy: policy}, nil
+	if marketData == nil {
+		return nil, fmt.Errorf("market data is required")
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil, fmt.Errorf("symbol is required")
+	}
+	return &DailyCycle{broker: broker, policy: policy, marketData: marketData, symbol: symbol}, nil
 }
 
 func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
@@ -131,14 +149,10 @@ func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
 	}
 
 	result := CycleResult{
-		Outcome: OutcomeMarketClosed,
 		Snapshot: DailySnapshot{
 			Clock: clock,
 		},
 		DryRun: true,
-	}
-	if !clock.IsOpen {
-		return result, nil
 	}
 
 	account, err := c.broker.Account(ctx)
@@ -164,12 +178,22 @@ func (c *DailyCycle) Run(ctx context.Context) (CycleResult, error) {
 		return result, nil
 	}
 
-	// Conservatively skip the policy whenever any order is still open. This is
-	// the initial duplicate-order guard until symbol-specific rules are chosen.
-	if len(openOrders) > 0 {
-		result.Outcome = OutcomeOpenOrdersPresent
-		return result, nil
+	// Open orders remain visible to read-only policies. Execution is disabled;
+	// a future execution gate must independently handle pending exposure.
+
+	req, err := newHistoryRequest(c.symbol, clock.Timestamp)
+	if err != nil {
+		return CycleResult{}, err
 	}
+	bars, err := c.marketData.DailyBars(ctx, req)
+	if err != nil {
+		return CycleResult{}, fmt.Errorf("get daily history: %w", err)
+	}
+	bars, err = validateDailyBars(req, bars)
+	if err != nil {
+		return CycleResult{}, fmt.Errorf("validate daily history: %w", err)
+	}
+	result.Snapshot.History = DailyHistory{Symbol: c.symbol, Feed: dailyHistoryFeed, Adjustment: dailyHistoryAdjustment, Bars: bars}
 
 	decision, err := c.policy.Decide(ctx, result.Snapshot)
 	if err != nil {

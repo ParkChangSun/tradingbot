@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
+
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
+	"github.com/shopspring/decimal"
 )
 
 const (
@@ -53,13 +57,8 @@ func newAlpacaBroker(baseURL, apiKey, apiSecret string, client *http.Client) (*A
 }
 
 func (b *AlpacaBroker) Clock(ctx context.Context) (MarketClock, error) {
-	var response struct {
-		Timestamp time.Time `json:"timestamp"`
-		IsOpen    bool      `json:"is_open"`
-		NextOpen  time.Time `json:"next_open"`
-		NextClose time.Time `json:"next_close"`
-	}
-	if err := b.get(ctx, "/v2/clock", &response); err != nil {
+	response, err := callAlpaca(b, ctx, func(client *alpaca.Client) (*alpaca.Clock, error) { return client.GetClock() })
+	if err != nil {
 		return MarketClock{}, err
 	}
 
@@ -72,16 +71,8 @@ func (b *AlpacaBroker) Clock(ctx context.Context) (MarketClock, error) {
 }
 
 func (b *AlpacaBroker) Account(ctx context.Context) (AccountSnapshot, error) {
-	var response struct {
-		ID             string `json:"id"`
-		Status         string `json:"status"`
-		Currency       string `json:"currency"`
-		BuyingPower    string `json:"buying_power"`
-		Equity         string `json:"equity"`
-		Cash           string `json:"cash"`
-		TradingBlocked bool   `json:"trading_blocked"`
-	}
-	if err := b.get(ctx, "/v2/account", &response); err != nil {
+	response, err := callAlpaca(b, ctx, func(client *alpaca.Client) (*alpaca.Account, error) { return client.GetAccount() })
+	if err != nil {
 		return AccountSnapshot{}, err
 	}
 
@@ -89,52 +80,39 @@ func (b *AlpacaBroker) Account(ctx context.Context) (AccountSnapshot, error) {
 		ID:             response.ID,
 		Status:         response.Status,
 		Currency:       response.Currency,
-		BuyingPower:    response.BuyingPower,
-		Equity:         response.Equity,
-		Cash:           response.Cash,
+		BuyingPower:    response.BuyingPower.String(),
+		Equity:         response.Equity.String(),
+		Cash:           response.Cash.String(),
 		TradingBlocked: response.TradingBlocked,
 	}, nil
 }
 
 func (b *AlpacaBroker) Positions(ctx context.Context) ([]Position, error) {
-	var response []struct {
-		AssetID     string `json:"asset_id"`
-		Symbol      string `json:"symbol"`
-		AssetClass  string `json:"asset_class"`
-		Quantity    string `json:"qty"`
-		Side        string `json:"side"`
-		MarketValue string `json:"market_value"`
-	}
-	if err := b.get(ctx, "/v2/positions", &response); err != nil {
+	response, err := callAlpaca(b, ctx, func(client *alpaca.Client) ([]alpaca.Position, error) { return client.GetPositions() })
+	if err != nil {
 		return nil, err
 	}
 
 	positions := make([]Position, len(response))
 	for i, position := range response {
 		positions[i] = Position{
-			AssetID:     position.AssetID,
-			Symbol:      position.Symbol,
-			AssetClass:  position.AssetClass,
-			Quantity:    position.Quantity,
-			Side:        position.Side,
-			MarketValue: position.MarketValue,
+			AssetID:           position.AssetID,
+			Symbol:            position.Symbol,
+			AssetClass:        string(position.AssetClass),
+			Quantity:          position.Qty.String(),
+			Side:              position.Side,
+			MarketValue:       optionalDecimal(position.MarketValue),
+			AverageEntryPrice: position.AvgEntryPrice.String(),
 		}
 	}
 	return positions, nil
 }
 
 func (b *AlpacaBroker) OpenOrders(ctx context.Context) ([]OpenOrder, error) {
-	var response []struct {
-		ID            string    `json:"id"`
-		ClientOrderID string    `json:"client_order_id"`
-		Symbol        string    `json:"symbol"`
-		AssetClass    string    `json:"asset_class"`
-		Side          string    `json:"side"`
-		Quantity      string    `json:"qty"`
-		Status        string    `json:"status"`
-		SubmittedAt   time.Time `json:"submitted_at"`
-	}
-	if err := b.get(ctx, "/v2/orders?status=open&limit=500&direction=asc", &response); err != nil {
+	response, err := callAlpaca(b, ctx, func(client *alpaca.Client) ([]alpaca.Order, error) {
+		return client.GetOrders(alpaca.GetOrdersRequest{Status: "open", Limit: 500, Direction: "asc"})
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -144,9 +122,9 @@ func (b *AlpacaBroker) OpenOrders(ctx context.Context) ([]OpenOrder, error) {
 			ID:            order.ID,
 			ClientOrderID: order.ClientOrderID,
 			Symbol:        order.Symbol,
-			AssetClass:    order.AssetClass,
-			Side:          order.Side,
-			Quantity:      order.Quantity,
+			AssetClass:    string(order.AssetClass),
+			Side:          string(order.Side),
+			Quantity:      optionalDecimal(order.Qty),
 			Status:        order.Status,
 			SubmittedAt:   order.SubmittedAt,
 		}
@@ -154,38 +132,110 @@ func (b *AlpacaBroker) OpenOrders(ctx context.Context) ([]OpenOrder, error) {
 	return orders, nil
 }
 
-func (b *AlpacaBroker) get(ctx context.Context, endpoint string, target any) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("create Alpaca request: %w", err)
+// callAlpaca uses a per-call client so context and response metadata never leak
+// between concurrent broker calls. The caller's HTTP client is copied, not mutated.
+func callAlpaca[T any](b *AlpacaBroker, ctx context.Context, call func(*alpaca.Client) (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, err
 	}
+	transport := b.client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	var requestID string
+	client := *b.client
+	client.Transport = alpacaTransport{ctx: ctx, base: transport, apiKey: b.apiKey, apiSecret: b.apiSecret, requestID: &requestID}
+	sdk := alpaca.NewClient(alpaca.ClientOpts{
+		APIKey: b.apiKey, APISecret: b.apiSecret, BaseURL: b.baseURL,
+		HTTPClient: &client,
+		// Zero selects the SDK default retries; a negative value disables retries.
+		RetryLimit: -1,
+	})
+	result, err := call(sdk)
+	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
+		if requestID != "" {
+			return zero, fmt.Errorf("Alpaca request failed (request ID %s): %w", requestID, err)
+		}
+		return zero, fmt.Errorf("Alpaca request failed: %w", err)
+	}
+	return result, nil
+}
+
+type alpacaTransport struct {
+	ctx               context.Context
+	base              http.RoundTripper
+	apiKey, apiSecret string
+	requestID         *string
+}
+
+func (t alpacaTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	*t.requestID = ""
+	if err := t.ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Keep the HTTP client's timeout context while adding caller cancellation.
+	ctx, cancel := context.WithCancel(request.Context())
+	stop := context.AfterFunc(t.ctx, cancel)
+	cleanup := func() { stop(); cancel() }
+	request = request.Clone(ctx)
+	// The SDK can load OAuth from the environment. Preserve this application's
+	// explicit API-key authentication even when that unrelated variable is set.
+	request.Header.Del("Authorization")
+	request.Header.Set("APCA-API-KEY-ID", t.apiKey)
+	request.Header.Set("APCA-API-SECRET-KEY", t.apiSecret)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("APCA-API-KEY-ID", b.apiKey)
-	request.Header.Set("APCA-API-SECRET-KEY", b.apiSecret)
-
-	response, err := b.client.Do(request)
+	response, err := t.base.RoundTrip(request)
 	if err != nil {
-		return fmt.Errorf("send Alpaca request: %w", err)
+		cleanup()
+		return nil, err
 	}
-	defer response.Body.Close()
+	*t.requestID = response.Header.Get("X-Request-ID")
+	// Buffer a bounded decoded body and close it here: the market-data SDK does
+	// not close successful response bodies itself. This also bounds gzip output.
+	defer cleanup()
+	body, err := readAlpacaResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Del("Content-Length")
+	return response, nil
+}
 
-	limitedBody := io.LimitReader(response.Body, maxAlpacaResponseSize)
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		var apiError struct {
-			Message string `json:"message"`
+func readAlpacaResponse(response *http.Response) (body []byte, err error) {
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close Alpaca response: %w", closeErr))
 		}
-		_ = json.NewDecoder(limitedBody).Decode(&apiError)
-		if apiError.Message == "" {
-			apiError.Message = "request failed"
+	}()
+	var reader io.Reader = response.Body
+	if response.Header.Get("Content-Encoding") == "gzip" {
+		decoded, decodeErr := gzip.NewReader(response.Body)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode Alpaca response: %w", decodeErr)
 		}
-		if requestID := response.Header.Get("X-Request-ID"); requestID != "" {
-			return fmt.Errorf("Alpaca API returned %s (request ID %s): %s", response.Status, requestID, apiError.Message)
-		}
-		return fmt.Errorf("Alpaca API returned %s: %s", response.Status, apiError.Message)
+		defer decoded.Close() // gzip.Reader.Close does not close the underlying body.
+		reader = decoded
+		response.Header.Del("Content-Encoding")
 	}
+	body, err = io.ReadAll(io.LimitReader(reader, maxAlpacaResponseSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Alpaca response: %w", err)
+	}
+	if len(body) > maxAlpacaResponseSize {
+		return nil, fmt.Errorf("Alpaca response exceeds %d bytes", maxAlpacaResponseSize)
+	}
+	return body, nil
+}
 
-	if err := json.NewDecoder(limitedBody).Decode(target); err != nil {
-		return fmt.Errorf("decode Alpaca response: %w", err)
+func optionalDecimal(value *decimal.Decimal) string {
+	if value == nil {
+		return ""
 	}
-	return nil
+	return value.String()
 }
